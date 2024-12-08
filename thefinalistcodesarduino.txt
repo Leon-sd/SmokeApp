@@ -1,0 +1,138 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+
+// Pin Definitions
+#define GAS_SMOKE_SENSOR_PIN 33  // Analog output (AO)
+#define BUTTON_PIN 4             // Button pin for ON/OFF
+
+#define LED_SYSTEM_PIN 25        // Green LED for system ON/OFF
+#define LED_ALERT_PIN 26         // Red LED for alert
+
+// Firebase Setup
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+#define WIFI_SSID "Extra 2.4"
+#define WIFI_PASSWORD "Naruto@11234"
+#define API_KEY "AIzaSyD7Yc9cd5UfrtWGvbMwaLNY9ctRg5miG9k"
+#define DATABASE_URL "https://sample-7577c-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Declare firebaseData globally
+FirebaseData firebaseData;
+
+// Timing Variables
+unsigned long previousMillis = 0;
+const unsigned long readInterval = 2000; // Read sensor every 2 seconds
+bool systemOn = false; // Start with system ON (Initial state)
+
+// System States
+enum SystemState { NORMAL, ALERT, DANGER };
+SystemState currentState = NORMAL;
+
+// Thresholds (calibrate these)
+const int GAS_THRESHOLD = 300;     // Value for gas leak detection
+const int SMOKE_THRESHOLD = 500;   // Value for smoke detection
+
+void setup() {
+  Serial.begin(115200);
+
+  // Connect to Wi-Fi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  // Firebase Setup
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase Sign Up Successful");
+  } else {
+    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.reconnectWiFi(true);
+  Firebase.begin(&config, &auth);
+
+  // Pin Setup
+  pinMode(GAS_SMOKE_SENSOR_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Set button as input with pull-up resistor
+  pinMode(LED_SYSTEM_PIN, OUTPUT);
+  pinMode(LED_ALERT_PIN, OUTPUT);
+
+  // Set initial LED state to OFF
+  digitalWrite(LED_SYSTEM_PIN, LOW); // Initially off
+  digitalWrite(LED_ALERT_PIN, LOW);  // Initially off
+
+  // Attach interrupt for button press
+}
+
+
+void loop() {
+  // Handle ON/OFF button press
+  static bool buttonPressed = false;
+  if (digitalRead(BUTTON_PIN) == LOW && !buttonPressed) {
+    buttonPressed = true; // Debounce
+    systemOn = !systemOn; // Toggle system state
+    
+    // Update system LED
+    digitalWrite(LED_SYSTEM_PIN, systemOn ? HIGH : LOW);
+
+    if (!systemOn) {
+      Serial.println("System Turned OFF");
+      digitalWrite(LED_ALERT_PIN, LOW); // Turn off alert LED
+      currentState = NORMAL;
+    } else {
+      Serial.println("System Turned ON");
+    }
+
+    delay(200); // Simple debounce delay
+  } else if (digitalRead(BUTTON_PIN) == HIGH) {
+    buttonPressed = false;
+  }
+
+  if (!systemOn) return; // Skip if system is OFF
+
+  // Read sensor data at defined interval
+  if (millis() - previousMillis >= readInterval) {
+    previousMillis = millis();
+    int analogValue = analogRead(GAS_SMOKE_SENSOR_PIN);
+    Serial.printf("Analog Value: %d\n", analogValue);
+
+    // State machine logic
+    if (analogValue > SMOKE_THRESHOLD) {
+      currentState = DANGER;
+    } else if (analogValue >= GAS_THRESHOLD) {
+      currentState = ALERT;
+    } else {
+      currentState = NORMAL;
+    }
+
+    // Update alert LED based on state
+    if (currentState == DANGER || currentState == ALERT) {
+      digitalWrite(LED_ALERT_PIN, HIGH); // Turn on red LED
+    } else { 
+      digitalWrite(LED_ALERT_PIN, LOW);  // Turn off red LED
+    }
+
+    // Send data to Firebase for mobile app to visualize
+    if (Firebase.ready()) {
+      Firebase.RTDB.setInt(&fbdo, "/sensorReading/analogValue", analogValue);
+      Firebase.RTDB.setString(&fbdo, "/sensorReading/state",
+                               currentState == NORMAL ? "Normal" :
+                               currentState == ALERT ? "Alert" : "Danger");
+    }
+  }
+}
